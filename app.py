@@ -1,38 +1,34 @@
 from flask import Flask, jsonify, request
-import sys
 import os
-import glob
 import pandas as pd
 import gspread
-import json
 from oauth2client.service_account import ServiceAccountCredentials
+from werkzeug.utils import secure_filename
 
-# ================== KHỞI TẠO APP FLASK ==================
 app = Flask(__name__)
 
-# ================== CÁC HÀM GỐC ==================
-def connect_to_google_sheets(scope):
-    # Đọc credentials từ biến môi trường (Render -> Environment)
-    creds_json = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
+# -------------------- CẤU HÌNH --------------------
+UPLOAD_FOLDER = "/tmp"  # Render chỉ cho phép ghi tạm trong /tmp
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# File credentials.json nên để trong Render Environment variable
+CREDENTIALS_ENV = "GOOGLE_CREDS"  # tên biến môi trường
+
+def get_credentials_from_env():
+    import json
+    creds_json = os.environ.get(CREDENTIALS_ENV)
+    if not creds_json:
+        raise Exception("Thiếu biến môi trường GOOGLE_CREDS trên Render!")
+    creds_dict = json.loads(creds_json)
+    with open("/tmp/credentials.json", "w") as f:
+        json.dump(creds_dict, f)
+    return "/tmp/credentials.json"
+
+# -------------------- HÀM PHỤ --------------------
+def connect_to_google_sheets(credentials_file, scope):
+    creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
     client = gspread.authorize(creds)
     return client
-
-def get_worksheet(client, spreadsheet_url, worksheet_name):
-    spreadsheet = client.open_by_url(spreadsheet_url)
-    worksheet = spreadsheet.worksheet(worksheet_name)
-    return worksheet
-
-def read_excel_data(file_path, sheet_name="Master Plan", selected_columns=None):
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=2)
-    for col in df.columns:
-        if "CHD" in col:
-            df.rename(columns={col: "CHD"}, inplace=True)
-            break
-    available_cols = [col for col in selected_columns.keys() if col in df.columns]
-    df = df[available_cols]
-    df = df.rename({col: selected_columns[col] for col in available_cols}, axis=1)
-    return df
 
 def update_google_sheet(worksheet, dataframe):
     dataframe = dataframe.where(pd.notnull(dataframe), "")
@@ -43,54 +39,43 @@ def update_google_sheet(worksheet, dataframe):
     worksheet.update('A5', data)
     return len(data)
 
-# ================== API CHÍNH ==================
+# -------------------- API CHÍNH --------------------
 @app.route('/run_upload', methods=['POST'])
 def run_upload():
     try:
+        if 'file' not in request.files:
+            return jsonify({"status": "error", "message": "Không có file Excel gửi kèm!"}), 400
+
+        file = request.files['file']
+        filename = secure_filename(file.filename)
+        save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(save_path)
+
+        # Kết nối Google Sheets
+        credentials_file = get_credentials_from_env()
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        spreadsheet_url = "https://docs.google.com/spreadsheets/d/11qBWD7ew70L-MTVY0la5Fo4JxfmGbir_DR3vzB28u_8/edit?gid=826240624#gid=826240624"
-        worksheet_name = 'DATABASE'
-        folder_path = r"\\rg2fnp01.os.crystal.com\ShareRoot\SharedFolder\REGENT\DECATHLON\PUBLIC\2. DKL OM\1. KPI Management\5. Master plan"
-        excel_sheet_name = "Master Plan"
+        spreadsheet_url = "https://docs.google.com/spreadsheets/d/11qBWD7ew70L-MTVY0la5Fo4JxfmGbir_DR3vzB28u_8/edit#gid=826240624"
+        worksheet_name = "DATABASE"
 
-        selected_columns = {
-            "CC": "Style",
-            "R3": "Model",
-            "Season": "Season",
-            "Buy": "Buy Date",
-            "ORDER NO": "PO",
-            "CHD": "CHD",
-            "EHD": "EHD",
-            "HOT": "HOT",
-            "Standard Delay Reason": "Delay Reason",
-            "CAC": "CAC Code",
-            "Firm order": "Order Qty"
-        }
+        client = connect_to_google_sheets(credentials_file, scope)
+        worksheet = client.open_by_url(spreadsheet_url).worksheet(worksheet_name)
 
-        # ✅ Dùng credentials từ biến môi trường thay vì file
-        client = connect_to_google_sheets(scope)
-        worksheet = get_worksheet(client, spreadsheet_url, worksheet_name)
+        # Đọc file Excel
+        df = pd.read_excel(save_path, sheet_name="Master Plan", header=2)
 
-        # Tìm file Excel
-        file_patterns = ["AW24*", "AW25*", "SS25*", "SS26*"]
-        excel_files = []
-        for pattern in file_patterns:
-            excel_files.extend(glob.glob(os.path.join(folder_path, f"{pattern}.xlsx")))
+        # Ghi dữ liệu lên Google Sheets
+        rows = update_google_sheet(worksheet, df)
 
-        if not excel_files:
-            return jsonify({"status": "error", "message": "Không tìm thấy file Excel phù hợp."}), 404
+        return jsonify({"status": "success", "message": f"Đã upload {rows} dòng từ {filename} lên Google Sheets."})
 
-        all_dfs = [read_excel_data(f, excel_sheet_name, selected_columns) for f in excel_files]
-        final_df = pd.concat(all_dfs, ignore_index=True)
-        rows = update_google_sheet(worksheet, final_df)
-
-        return jsonify({"status": "success", "message": f"Đã upload {rows} dòng lên Google Sheets."})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 @app.route('/')
 def home():
-    return jsonify({"message": "Masterplan API đang hoạt động!"})
+    return jsonify({"message": "Masterplan API hoạt động bình thường 🚀"})
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
