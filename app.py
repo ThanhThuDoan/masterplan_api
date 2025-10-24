@@ -4,14 +4,17 @@ import os
 import glob
 import pandas as pd
 import gspread
+import json
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================== KHỞI TẠO APP FLASK ==================
 app = Flask(__name__)
 
-# ================== CÁC HÀM GỐC (giữ nguyên code của bạn) ==================
-def connect_to_google_sheets(credentials_file, scope):
-    creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+# ================== CÁC HÀM GỐC ==================
+def connect_to_google_sheets(scope):
+    # Đọc credentials từ biến môi trường (Render -> Environment)
+    creds_json = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
     client = gspread.authorize(creds)
     return client
 
@@ -44,7 +47,6 @@ def update_google_sheet(worksheet, dataframe):
 @app.route('/run_upload', methods=['POST'])
 def run_upload():
     try:
-        credentials_file = "credentials.json"   # file này bạn upload cùng code lên Render
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         spreadsheet_url = "https://docs.google.com/spreadsheets/d/11qBWD7ew70L-MTVY0la5Fo4JxfmGbir_DR3vzB28u_8/edit?gid=826240624#gid=826240624"
         worksheet_name = 'DATABASE'
@@ -65,7 +67,8 @@ def run_upload():
             "Firm order": "Order Qty"
         }
 
-        client = connect_to_google_sheets(credentials_file, scope)
+        # ✅ Dùng credentials từ biến môi trường thay vì file
+        client = connect_to_google_sheets(scope)
         worksheet = get_worksheet(client, spreadsheet_url, worksheet_name)
 
         # Tìm file Excel
